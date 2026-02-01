@@ -7,47 +7,41 @@ const ArScene = () => {
   const scriptsLoaded = useRef(false);
   const pollInterval = useRef(null);
 
-  const [arInfo, setArInfo] = useState({
-    distanceInfo: {},
-    latitude: null,
-    longitude: null,
-    caught: {},
-  });
-
   const [permissionsGranted, setPermissionsGranted] = useState(false);
 
-  const handleCaught = (name) => {
-    alert(`You caught the ${name}! 🎉`);
-  };
+  const [arInfo, setArInfo] = useState({
+    distance: null,
+    latitude: null,
+    longitude: null,
+    caught: false,
+  });
 
-  // Request Location and Camera
   const requestPermissions = async () => {
     try {
-      // Request Location
+      // Camera permission
+      await navigator.mediaDevices.getUserMedia({ video: true });
+
+      // Location permission
       await new Promise((resolve, reject) => {
         navigator.geolocation.getCurrentPosition(
           () => resolve(),
-          (err) => reject(err)
+          () => reject(),
+          { enableHighAccuracy: true }
         );
       });
 
-      // Request Camera
-      await navigator.mediaDevices.getUserMedia({ video: true });
-
       setPermissionsGranted(true);
-    } catch (err) {
-      alert(
-        "We need both Location and Camera permissions to run this AR experience!"
-      );
+    } catch (e) {
+      alert("Camera and Location permissions are required for AR.");
     }
   };
 
-  useEffect(() => {
-    if (!permissionsGranted) {
-      requestPermissions();
-      return;
-    }
+  const handleCaught = () => {
+    alert("You caught the Champagne Bottle! 🍾");
+  };
 
+  useEffect(() => {
+    if (!permissionsGranted) return;
     if (scriptsLoaded.current) return;
     scriptsLoaded.current = true;
 
@@ -65,18 +59,20 @@ const ArScene = () => {
       // Load A-Frame
       if (!window.AFRAME)
         await loadScript("https://aframe.io/releases/1.6.0/aframe.min.js");
+
       await new Promise((r) => setTimeout(r, 500));
 
-      // Load AR.js
+      // Load AR.js GPS build
       await loadScript(
         "https://raw.githack.com/AR-js-org/AR.js/3.4.7/three.js/build/ar-threex-location-only.js"
       );
       await loadScript(
         "https://raw.githack.com/AR-js-org/AR.js/3.4.7/aframe/build/aframe-ar.js"
       );
+
       await new Promise((r) => setTimeout(r, 500));
 
-      // Dynamic scaling component
+      // Real world scaling component
       AFRAME.registerComponent("dynamic-scale-by-distance", {
         schema: {
           minDistance: { default: 0.5 },
@@ -103,50 +99,8 @@ const ArScene = () => {
         },
       });
 
-      // AR objects
-      const arObjects = [
-        {
-          name: "Cube",
-          model: "/models/cube.glb",
-          lat: 10.767406,
-          lon: 78.813385,
-        },
-        {
-          name: "Cottage Blender",
-          model: "/models/cottage.glb",
-          lat: 10.767450,
-          lon: 78.813420,
-        },
-      ];
-
-      // Inject A-Frame scene
+      // Inject scene
       const container = sceneRef.current.querySelector("[data-ar-container]");
-      let entitiesHtml = "";
-      arObjects.forEach((obj) => {
-        entitiesHtml += `
-          <a-entity
-            id="${obj.name.replace(/\s+/g, "-").toLowerCase()}"
-            gltf-model="${obj.model}"
-            gps-new-entity-place="latitude: ${obj.lat}; longitude: ${obj.lon};"
-            dynamic-scale-by-distance
-            animation="property: rotation; to: 0 360 0; loop: true; dur: 5000"
-          ></a-entity>
-
-          <a-entity
-            gps-new-entity-place="latitude: ${obj.lat}; longitude: ${obj.lon};"
-            position="0 2 0"
-          >
-            <a-text
-              value="${obj.name}"
-              align="center"
-              color="white"
-              scale="2 2 2"
-              look-at="[gps-camera]"
-            ></a-text>
-          </a-entity>
-        `;
-      });
-
       container.innerHTML = `
         <a-scene
           vr-mode-ui="enabled: false"
@@ -154,42 +108,56 @@ const ArScene = () => {
           renderer="antialias: true; alpha: true"
         >
           <a-camera gps-new-camera="gpsMinDistance: 0.5" look-controls-enabled="false"></a-camera>
-          ${entitiesHtml}
+
+          <a-entity
+            id="bottle"
+            gltf-model="/models/champagne-bottle.glb"
+            gps-new-entity-place="latitude: 10.767406; longitude: 78.813385;"
+            dynamic-scale-by-distance
+            animation="property: rotation; to: 0 360 0; loop: true; dur: 5000"
+          ></a-entity>
+
+          <a-entity
+            gps-new-entity-place="latitude: 10.767406; longitude: 78.813385;"
+            position="0 2 0"
+          >
+            <a-text
+              value="Champagne 🍾"
+              align="center"
+              color="white"
+              scale="2 2 2"
+              look-at="[gps-camera]"
+            ></a-text>
+          </a-entity>
         </a-scene>
       `;
 
-      startGPSPolling(arObjects);
+      startGPSPolling();
     };
 
-    // GPS polling
-    const startGPSPolling = (arObjects) => {
+    const startGPSPolling = () => {
+      const TARGET_LAT = 10.767406;
+      const TARGET_LON = 78.813385;
+
       const poll = () => {
         navigator.geolocation.getCurrentPosition((pos) => {
           const { latitude, longitude } = pos.coords;
-          const R = 6371000; // Earth radius in meters
 
-          const distanceInfo = {};
-          const caughtInfo = {};
-
-          arObjects.forEach((obj) => {
-            const dLat = (obj.lat - latitude) * (Math.PI / 180);
-            const dLon = (obj.lon - longitude) * (Math.PI / 180);
-            const a =
-              Math.sin(dLat / 2) ** 2 +
-              Math.cos(latitude * (Math.PI / 180)) *
-                Math.cos(obj.lat * (Math.PI / 180)) *
-                Math.sin(dLon / 2) ** 2;
-            const distance = R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
-
-            distanceInfo[obj.name] = Math.round(distance);
-            caughtInfo[obj.name] = distance < 1;
-          });
+          const R = 6371000;
+          const dLat = (TARGET_LAT - latitude) * (Math.PI / 180);
+          const dLon = (TARGET_LON - longitude) * (Math.PI / 180);
+          const a =
+            Math.sin(dLat / 2) ** 2 +
+            Math.cos(latitude * (Math.PI / 180)) *
+              Math.cos(TARGET_LAT * (Math.PI / 180)) *
+              Math.sin(dLon / 2) ** 2;
+          const distance = R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
 
           setArInfo({
             latitude: latitude.toFixed(6),
             longitude: longitude.toFixed(6),
-            distanceInfo,
-            caught: caughtInfo,
+            distance: Math.round(distance),
+            caught: distance < 1,
           });
         });
       };
@@ -205,84 +173,74 @@ const ArScene = () => {
     };
   }, [permissionsGranted]);
 
-  if (!permissionsGranted) {
-    return (
-      <div
-        style={{
-          width: "100vw",
-          height: "100vh",
-          display: "flex",
-          justifyContent: "center",
-          alignItems: "center",
-          background: "#000",
-          color: "#fff",
-          fontFamily: "sans-serif",
-          textAlign: "center",
-          padding: 20,
-        }}
-      >
-        <div>
-          <p>AR experience requires location and camera access.</p>
+  return (
+    <div style={{ width: "100vw", height: "100vh", background: "#000" }}>
+      {!permissionsGranted ? (
+        <div
+          style={{
+            color: "white",
+            height: "100%",
+            display: "flex",
+            justifyContent: "center",
+            alignItems: "center",
+            flexDirection: "column",
+            fontFamily: "sans-serif",
+            textAlign: "center",
+            padding: 20,
+          }}
+        >
+          <h2>AR Experience Requires Permissions</h2>
+          <p>Please allow Camera and Location access</p>
           <button
             onClick={requestPermissions}
             style={{
-              padding: "10px 20px",
+              padding: "12px 20px",
               fontSize: 16,
-              marginTop: 20,
+              borderRadius: 8,
+              border: "none",
+              background: "#4CAF50",
+              color: "#fff",
               cursor: "pointer",
             }}
           >
             Grant Permissions
           </button>
         </div>
-      </div>
-    );
-  }
+      ) : (
+        <>
+          <div
+            ref={sceneRef}
+            style={{ width: "100%", height: "100%", background: "#000" }}
+          >
+            <div data-ar-container style={{ width: "100%", height: "100%" }} />
+          </div>
 
-  return (
-    <div
-      ref={sceneRef}
-      style={{ width: "100vw", height: "100vh", background: "#000" }}
-    >
-      <div data-ar-container style={{ width: "100%", height: "100%" }} />
-
-      {/* UI */}
-      <div
-        style={{
-          position: "absolute",
-          top: 20,
-          left: 20,
-          background: "rgba(0,0,0,0.8)",
-          color: "#fff",
-          padding: 15,
-          borderRadius: 10,
-          fontFamily: "monospace",
-          fontSize: 12,
-        }}
-      >
-        <div>Lat: {arInfo.latitude}</div>
-        <div>Lon: {arInfo.longitude}</div>
-        <hr />
-        {arInfo.distanceInfo &&
-          Object.keys(arInfo.distanceInfo).map((name) => (
-            <div key={name} style={{ marginBottom: 6 }}>
-              <strong>{name}</strong> - {arInfo.distanceInfo[name]}m -{" "}
-              {arInfo.caught[name] ? (
-                <>
-                  🎉 CAUGHT!
-                  <button
-                    onClick={() => handleCaught(name)}
-                    style={{ marginLeft: 6 }}
-                  >
-                    Catch
-                  </button>
-                </>
-              ) : (
-                "SEARCHING"
-              )}
-            </div>
-          ))}
-      </div>
+          <div
+            style={{
+              position: "absolute",
+              top: 20,
+              left: 20,
+              background: "rgba(0,0,0,0.8)",
+              color: "#fff",
+              padding: 15,
+              borderRadius: 10,
+              fontFamily: "monospace",
+              fontSize: 12,
+            }}
+          >
+            <div>Lat: {arInfo.latitude}</div>
+            <div>Lon: {arInfo.longitude}</div>
+            <div>Distance: {arInfo.distance}m</div>
+            <div>{arInfo.caught ? "🎉 CAUGHT!" : "SEARCHING"}</div>
+            {arInfo.caught && (
+              <div style={{ marginTop: 10, color: "yellow" }}>
+                You caught the Champagne Bottle! 🍾
+                <button onClick={handleCaught}>Catch</button>
+              </div>
+            )}
+          </div>
+        </>
+      )}
     </div>
   );
 };
