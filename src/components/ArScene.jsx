@@ -115,7 +115,7 @@ const ArScene = () => {
           name: "Cottage Blender",
           model: "/models/cottage-blender.glb",
           lat: 10.767450,
-          lon: 78.813420,
+          lon: 78.813385,
         },
       ];
 
