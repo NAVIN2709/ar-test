@@ -8,17 +8,46 @@ const ArScene = () => {
   const pollInterval = useRef(null);
 
   const [arInfo, setArInfo] = useState({
-    distanceInfo: {}, // distances for all objects
+    distanceInfo: {},
     latitude: null,
     longitude: null,
     caught: {},
   });
 
+  const [permissionsGranted, setPermissionsGranted] = useState(false);
+
   const handleCaught = (name) => {
     alert(`You caught the ${name}! 🎉`);
   };
 
+  // Request Location and Camera
+  const requestPermissions = async () => {
+    try {
+      // Request Location
+      await new Promise((resolve, reject) => {
+        navigator.geolocation.getCurrentPosition(
+          () => resolve(),
+          (err) => reject(err)
+        );
+      });
+
+      // Request Camera
+      await navigator.mediaDevices.getUserMedia({ video: true });
+
+      setPermissionsGranted(true);
+    } catch (err) {
+      alert(
+        "We need both Location and Camera permissions to run this AR experience!"
+      );
+    }
+  };
+
   useEffect(() => {
+    if (!permissionsGranted) {
+      requestPermissions();
+      return;
+    }
+
     if (scriptsLoaded.current) return;
     scriptsLoaded.current = true;
 
@@ -47,7 +76,7 @@ const ArScene = () => {
       );
       await new Promise((r) => setTimeout(r, 500));
 
-      // ✅ Register dynamic scaling component
+      // Dynamic scaling component
       AFRAME.registerComponent("dynamic-scale-by-distance", {
         schema: {
           minDistance: { default: 0.5 },
@@ -74,7 +103,7 @@ const ArScene = () => {
         },
       });
 
-      // Define objects with GPS
+      // AR objects
       const arObjects = [
         {
           name: "Cube",
@@ -92,7 +121,6 @@ const ArScene = () => {
 
       // Inject A-Frame scene
       const container = sceneRef.current.querySelector("[data-ar-container]");
-
       let entitiesHtml = "";
       arObjects.forEach((obj) => {
         entitiesHtml += `
@@ -133,7 +161,7 @@ const ArScene = () => {
       startGPSPolling(arObjects);
     };
 
-    // GPS polling for distances
+    // GPS polling
     const startGPSPolling = (arObjects) => {
       const poll = () => {
         navigator.geolocation.getCurrentPosition((pos) => {
@@ -154,7 +182,7 @@ const ArScene = () => {
             const distance = R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
 
             distanceInfo[obj.name] = Math.round(distance);
-            caughtInfo[obj.name] = distance < 1; // 1m to catch
+            caughtInfo[obj.name] = distance < 1;
           });
 
           setArInfo({
@@ -175,7 +203,41 @@ const ArScene = () => {
     return () => {
       if (pollInterval.current) clearInterval(pollInterval.current);
     };
-  }, []);
+  }, [permissionsGranted]);
+
+  if (!permissionsGranted) {
+    return (
+      <div
+        style={{
+          width: "100vw",
+          height: "100vh",
+          display: "flex",
+          justifyContent: "center",
+          alignItems: "center",
+          background: "#000",
+          color: "#fff",
+          fontFamily: "sans-serif",
+          textAlign: "center",
+          padding: 20,
+        }}
+      >
+        <div>
+          <p>AR experience requires location and camera access.</p>
+          <button
+            onClick={requestPermissions}
+            style={{
+              padding: "10px 20px",
+              fontSize: 16,
+              marginTop: 20,
+              cursor: "pointer",
+            }}
+          >
+            Grant Permissions
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
