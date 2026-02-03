@@ -3,10 +3,17 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Loader2, AlertCircle } from "lucide-react";
 
+// Three.js will be loaded from CDN via script tag
+
 const ARGame = () => {
   const canvasRef = useRef(null);
   const radarCanvasRef = useRef(null);
   const sessionRef = useRef(null);
+  const sceneRef = useRef(null);
+  const rendererRef = useRef(null);
+  const cameraRef = useRef(null);
+  const reticleRef = useRef(null);
+  const placedObjectsRef = useRef([]);
   
   const [permissionsGranted, setPermissionsGranted] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -18,6 +25,27 @@ const ARGame = () => {
   const [userHeading, setUserHeading] = useState(0);
   const [readyForAR, setReadyForAR] = useState(false);
   const [debugLogs, setDebugLogs] = useState([]);
+  const [threeLoaded, setThreeLoaded] = useState(false);
+
+  // Load Three.js from CDN
+  useEffect(() => {
+    if (typeof window !== 'undefined' && !window.THREE) {
+      const script = document.createElement('script');
+      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js';
+      script.async = true;
+      script.onload = () => {
+        addDebugLog('✓ Three.js loaded from CDN');
+        setThreeLoaded(true);
+      };
+      script.onerror = () => {
+        addDebugLog('✗ Failed to load Three.js', 'error');
+      };
+      document.body.appendChild(script);
+    } else if (window.THREE) {
+      setThreeLoaded(true);
+      addDebugLog('✓ Three.js already loaded');
+    }
+  }, []);
 
   // Add debug log function
   const addDebugLog = (message, type = "info") => {
@@ -33,17 +61,17 @@ const ARGame = () => {
       id: "tclogo", 
       name: "Tc Logo", 
       model: "/models/tc.glb",
-      lat: 10.767501,
+      lat: 10.767510,
       lon: 78.813882,
-      scale: 0.5,
+      scale: 20,
       color: "#FF6B6B" // Red
     },
     { 
       id: "gold_coin", 
       name: "Gold Coin", 
       model: "/models/gold_coin.glb",
-      lat: 10.767450,
-      lon: 78.813460,
+      lat: 10.7678,
+      lon: 78.8134,
       scale: 0.3,
       color: "#FFD93D" // Yellow
     },
@@ -285,7 +313,7 @@ const ARGame = () => {
           findNearbyObjects(position.coords.latitude, position.coords.longitude);
         }
       );
-    }, 3000);
+    }, 5000);
 
     return () => clearInterval(gpsInterval);
   }, [permissionsGranted]);
@@ -315,6 +343,11 @@ const ARGame = () => {
   const startAR = async () => {
     if (!readyForAR || arActive) {
       addDebugLog("AR already active or not ready", "warn");
+      return;
+    }
+
+    if (!threeLoaded || !window.THREE) {
+      addDebugLog("Three.js not loaded yet, please wait...", "warn");
       return;
     }
 
@@ -417,36 +450,151 @@ const ARGame = () => {
   };
 
   const setupRendering = (session, gl, referenceSpace, hitTestSource) => {
-    addDebugLog("Setting up render loop...");
+    addDebugLog("Setting up Three.js scene...");
     
-    const animate = (time, frame) => {
-      const glLayer = session.renderState.baseLayer;
-      gl.bindFramebuffer(gl.FRAMEBUFFER, glLayer.framebuffer);
+    if (!window.THREE) {
+      addDebugLog("Three.js not loaded!", "error");
+      return;
+    }
 
-      gl.clearColor(0, 0, 0, 0);
-      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-      gl.enable(gl.DEPTH_TEST);
+    const THREE = window.THREE;
+
+    // Create Three.js scene
+    const scene = new THREE.Scene();
+    sceneRef.current = scene;
+    addDebugLog("✓ Scene created");
+
+    // Create camera (will be updated by XR)
+    const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+    cameraRef.current = camera;
+    addDebugLog("✓ Camera created");
+
+    // Create renderer using existing canvas and GL context
+    const renderer = new THREE.WebGLRenderer({
+      canvas: canvasRef.current,
+      context: gl,
+      alpha: true,
+      preserveDrawingBuffer: true,
+      antialias: true
+    });
+    renderer.autoClear = false;
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.xr.enabled = true;
+    renderer.xr.setReferenceSpaceType('local');
+    renderer.xr.setSession(session);
+    rendererRef.current = renderer;
+    addDebugLog("✓ Renderer configured for XR");
+
+    // Add lighting
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+    scene.add(ambientLight);
+    
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    directionalLight.position.set(0, 10, 10);
+    scene.add(directionalLight);
+    addDebugLog("✓ Lighting added");
+
+    // Create reticle (placement indicator)
+    const reticleGeometry = new THREE.RingGeometry(0.15, 0.2, 32).rotateX(-Math.PI / 2);
+    const reticleMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
+    const reticle = new THREE.Mesh(reticleGeometry, reticleMaterial);
+    reticle.matrixAutoUpdate = false;
+    reticle.visible = false;
+    scene.add(reticle);
+    reticleRef.current = reticle;
+    addDebugLog("✓ Reticle created");
+
+    // Auto-place objects based on GPS when reticle is first detected
+    let objectsPlaced = false;
+
+    // Animation loop
+    renderer.setAnimationLoop((time, frame) => {
+      if (!frame) return;
 
       const pose = frame.getViewerPose(referenceSpace);
       if (pose) {
-        for (let view of pose.views) {
-          const viewport = glLayer.getViewport(view);
-          gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
+        // Handle hit test for placement
+        if (hitTestSource && !objectsPlaced) {
+          const hitTestResults = frame.getHitTestResults(hitTestSource);
+          if (hitTestResults.length > 0) {
+            const hit = hitTestResults[0];
+            const hitPose = hit.getPose(referenceSpace);
+            
+            if (hitPose) {
+              // Show reticle at hit location
+              reticle.visible = true;
+              reticle.matrix.fromArray(hitPose.transform.matrix);
+
+              // Auto-place objects on first hit
+              if (!objectsPlaced) {
+                placeObjectsInAR(hitPose, scene, THREE);
+                objectsPlaced = true;
+                addDebugLog(`✓ Placed ${nearbyObjects.length} objects in AR!`);
+              }
+            }
+          }
         }
+
+        // Render the scene for each view
+        renderer.render(scene, camera);
+      }
+    });
+
+    addDebugLog("✓ Animation loop started with Three.js");
+  };
+
+  // Place AR objects based on GPS coordinates
+  const placeObjectsInAR = (hitPose, scene, THREE) => {
+    nearbyObjects.forEach((obj, index) => {
+      // Calculate position offset based on bearing and distance
+      const bearingRad = obj.bearing * Math.PI / 180;
+      const distanceScale = obj.distance / 100; // Scale down for AR view
+      
+      const xOffset = Math.sin(bearingRad) * distanceScale;
+      const zOffset = -Math.cos(bearingRad) * distanceScale;
+
+      // Create a simple geometric object (since we can't load GLB files easily)
+      let geometry;
+      switch(obj.id) {
+        case "tclogo":
+          geometry = new THREE.BoxGeometry(0.2, 0.2, 0.2);
+          break;
+        case "gold_coin":
+          geometry = new THREE.CylinderGeometry(0.15, 0.15, 0.05, 32);
+          break;
+        case "shiva_foods":
+          geometry = new THREE.SphereGeometry(0.15, 32, 32);
+          break;
+        default:
+          geometry = new THREE.BoxGeometry(0.2, 0.2, 0.2);
       }
 
-      if (hitTestSource) {
-        const hitTestResults = frame.getHitTestResults(hitTestSource);
-        if (hitTestResults.length > 0) {
-          // Objects can be placed here
-        }
-      }
+      const material = new THREE.MeshStandardMaterial({ 
+        color: obj.color,
+        metalness: 0.3,
+        roughness: 0.4,
+        emissive: obj.color,
+        emissiveIntensity: 0.2
+      });
+      
+      const mesh = new THREE.Mesh(geometry, material);
+      
+      // Position based on hit pose + GPS offset
+      mesh.position.set(
+        hitPose.transform.position.x + xOffset,
+        hitPose.transform.position.y + 0.3, // Raise objects up
+        hitPose.transform.position.z + zOffset
+      );
+      
+      // Add some rotation for visual interest
+      mesh.rotation.y = Math.random() * Math.PI * 2;
+      
+      scene.add(mesh);
+      placedObjectsRef.current.push({ mesh, obj });
 
-      session.requestAnimationFrame(animate);
-    };
-
-    session.requestAnimationFrame(animate);
-    addDebugLog("✓ Render loop started");
+      addDebugLog(`Placed ${obj.name} at offset (${xOffset.toFixed(2)}, ${zOffset.toFixed(2)})`);
+    });
   };
 
   return (
@@ -539,9 +687,10 @@ const ARGame = () => {
 
           <button
             onClick={startAR}
-            className="bg-green-600 hover:bg-green-700 px-12 py-6 rounded-xl text-white font-bold transition text-xl shadow-lg"
+            disabled={!threeLoaded}
+            className={`${threeLoaded ? 'bg-green-600 hover:bg-green-700' : 'bg-gray-600 cursor-not-allowed'} px-12 py-6 rounded-xl text-white font-bold transition text-xl shadow-lg`}
           >
-            🚀 Start AR Experience
+            {threeLoaded ? '🚀 Start AR Experience' : '⏳ Loading 3D Engine...'}
           </button>
 
           <p className="text-xs text-gray-500 max-w-xs text-center">
