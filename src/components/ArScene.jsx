@@ -33,8 +33,8 @@ const ARGame = () => {
       id: "tclogo", 
       name: "Tc Logo", 
       model: "/models/tc.glb",
-      lat: 10.767401,
-      lon: 78.813460,
+      lat: 10.767501,
+      lon: 78.813882,
       scale: 0.5,
       color: "#FF6B6B" // Red
     },
@@ -42,8 +42,8 @@ const ARGame = () => {
       id: "gold_coin", 
       name: "Gold Coin", 
       model: "/models/gold_coin.glb",
-      lat: 10.7678,
-      lon: 78.8134,
+      lat: 10.767450,
+      lon: 78.813460,
       scale: 0.3,
       color: "#FFD93D" // Yellow
     },
