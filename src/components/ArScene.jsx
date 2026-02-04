@@ -1,791 +1,422 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
-import { Loader2, AlertCircle } from "lucide-react";
+import * as THREE from "three";
+import { ARButton } from "three/examples/jsm/webxr/ARButton.js";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 
-// Three.js will be loaded from CDN via script tag
+const AR_OBJECTS = [
+  {
+    id: "tclogo",
+    model:
+      "https://res.cloudinary.com/dosaigy3m/image/upload/v1770233896/glowing_gem_ncmwjz.glb",
+    lat: 10.767406,
+    lon: 78.813385,
+  },
+  {
+    id: "gold_coin",
+    model: "/models/gold_coin.glb",
+    lat: 10.7678,
+    lon: 78.8134,
+  },
+];
 
-const ARGame = () => {
-  const canvasRef = useRef(null);
-  const radarCanvasRef = useRef(null);
-  const sessionRef = useRef(null);
-  const sceneRef = useRef(null);
-  const rendererRef = useRef(null);
-  const cameraRef = useRef(null);
-  const reticleRef = useRef(null);
-  const placedObjectsRef = useRef([]);
-  
-  const [permissionsGranted, setPermissionsGranted] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
-  const [gpsLocation, setGpsLocation] = useState({ lat: null, lon: null });
-  const [arActive, setArActive] = useState(false);
-  const [nearbyObjects, setNearbyObjects] = useState([]);
-  const [debug, setDebug] = useState("");
-  const [userHeading, setUserHeading] = useState(0);
-  const [readyForAR, setReadyForAR] = useState(false);
-  const [debugLogs, setDebugLogs] = useState([]);
-  const [threeLoaded, setThreeLoaded] = useState(false);
+export default function ARGame() {
+  const canvasRef = useRef();
+  const radarCanvasRef = useRef();
+  const overlayRef = useRef();
+  const arButtonRef = useRef(null);
 
-  // Load Three.js from CDN
+  const sceneRef = useRef();
+  const rendererRef = useRef();
+  const loader = useRef(new GLTFLoader());
+  const modelsRef = useRef({});
+
+  const headingRef = useRef(0);
+  const lastHeadingRef = useRef(0);
+  const userGpsRef = useRef(null);
+
+  const [gpsReady, setGpsReady] = useState(false);
+  const [loadingMessage, setLoadingMessage] = useState(
+    "Acquiring GPS position...",
+  );
+
+  // ---------------- DEVICE HEADING (with smoothing) ----------------
   useEffect(() => {
-    if (typeof window !== 'undefined' && !window.THREE) {
-      const script = document.createElement('script');
-      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js';
-      script.async = true;
-      script.onload = () => {
-        addDebugLog('✓ Three.js loaded from CDN');
-        setThreeLoaded(true);
-      };
-      script.onerror = () => {
-        addDebugLog('✗ Failed to load Three.js', 'error');
-      };
-      document.body.appendChild(script);
-    } else if (window.THREE) {
-      setThreeLoaded(true);
-      addDebugLog('✓ Three.js already loaded');
-    }
-  }, []);
-
-  // Add debug log function
-  const addDebugLog = (message, type = "info") => {
-    const timestamp = new Date().toLocaleTimeString();
-    const logEntry = { timestamp, message, type };
-    setDebugLogs(prev => [...prev.slice(-20), logEntry]); // Keep last 20 logs
-    console.log(`[${type.toUpperCase()}] ${message}`);
-  };
-
-  // AR Objects with GPS coordinates
-  const ar_objects = [
-    { 
-      id: "tclogo", 
-      name: "Tc Logo", 
-      model: "/models/tc.glb",
-      lat: 10.767510,
-      lon: 78.813882,
-      scale: 20,
-      color: "#FF6B6B" // Red
-    },
-    { 
-      id: "gold_coin", 
-      name: "Gold Coin", 
-      model: "/models/gold_coin.glb",
-      lat: 10.7678,
-      lon: 78.8134,
-      scale: 0.3,
-      color: "#FFD93D" // Yellow
-    },
-    { 
-      id: "shiva_foods", 
-      name: "Shiva Foods", 
-      model: "/models/glowing_gem.glb",
-      lat: 10.766162,
-      lon: 78.817099,
-      scale: 0.6,
-      color: "#6BCB77" // Green
-    },
-  ];
-
-  // Haversine formula
-  const calculateDistance = (lat1, lon1, lat2, lon2) => {
-    const R = 6371000;
-    const dLat = (lat2 - lat1) * Math.PI / 180;
-    const dLon = (lon2 - lon1) * Math.PI / 180;
-    const a = 
-      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-      Math.sin(dLon / 2) * Math.sin(dLon / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return R * c;
-  };
-
-  // Calculate bearing
-  const calculateBearing = (lat1, lon1, lat2, lon2) => {
-    const dLon = (lon2 - lon1) * Math.PI / 180;
-    const lat1Rad = lat1 * Math.PI / 180;
-    const lat2Rad = lat2 * Math.PI / 180;
-    
-    const y = Math.sin(dLon) * Math.cos(lat2Rad);
-    const x = Math.cos(lat1Rad) * Math.sin(lat2Rad) -
-              Math.sin(lat1Rad) * Math.cos(lat2Rad) * Math.cos(dLon);
-    
-    return Math.atan2(y, x) * 180 / Math.PI;
-  };
-
-  // Find nearby objects
-  const findNearbyObjects = (userLat, userLon) => {
-    const nearby = ar_objects
-      .map(obj => {
-        const distance = calculateDistance(userLat, userLon, obj.lat, obj.lon);
-        const bearing = calculateBearing(userLat, userLon, obj.lat, obj.lon);
-        return { ...obj, distance, bearing };
-      })
-      .filter(obj => obj.distance < 100)
-      .sort((a, b) => a.distance - b.distance);
-    
-    setNearbyObjects(nearby);
-    setDebug(`Found ${nearby.length} objects nearby`);
-    addDebugLog(`Found ${nearby.length} objects within 100m`);
-  };
-
-  // Draw Radar
-  useEffect(() => {
-    if (!radarCanvasRef.current || nearbyObjects.length === 0) return;
-
-    const canvas = radarCanvasRef.current;
-    const ctx = canvas.getContext("2d");
-    const width = canvas.width;
-    const height = canvas.height;
-    const centerX = width / 2;
-    const centerY = height / 2;
-    const maxRadius = Math.min(width, height) / 2 - 10;
-
-    // Clear canvas
-    ctx.fillStyle = "#1a1a2e";
-    ctx.fillRect(0, 0, width, height);
-
-    // Draw border
-    ctx.strokeStyle = "#00ff00";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(centerX, centerY, maxRadius, 0, Math.PI * 2);
-    ctx.stroke();
-
-    // Draw grid circles (distance markers)
-    ctx.strokeStyle = "rgba(0, 255, 0, 0.2)";
-    ctx.lineWidth = 1;
-    for (let i = 1; i < 4; i++) {
-      const radius = (maxRadius / 4) * i;
-      ctx.beginPath();
-      ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
-      ctx.stroke();
-    }
-
-    // Draw distance labels
-    ctx.fillStyle = "rgba(0, 255, 0, 0.5)";
-    ctx.font = "10px Arial";
-    ctx.textAlign = "right";
-    ctx.fillText("25m", centerX - 5, centerY - (maxRadius / 4) + 3);
-    ctx.fillText("50m", centerX - 5, centerY - (maxRadius / 2) + 3);
-    ctx.fillText("75m", centerX - 5, centerY - (maxRadius * 3 / 4) + 3);
-    ctx.fillText("100m", centerX - 5, centerY - maxRadius + 3);
-
-    // Draw cardinal directions
-    ctx.fillStyle = "#00ff00";
-    ctx.font = "bold 12px Arial";
-    ctx.textAlign = "center";
-    ctx.fillText("N", centerX, 15);
-    ctx.fillText("S", centerX, height - 5);
-    ctx.textAlign = "right";
-    ctx.fillText("E", width - 10, centerY + 4);
-    ctx.textAlign = "left";
-    ctx.fillText("W", 10, centerY + 4);
-
-    // Draw north indicator arrow
-    ctx.strokeStyle = "#00ff00";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(centerX, centerY - maxRadius + 20);
-    ctx.lineTo(centerX - 5, centerY - maxRadius + 30);
-    ctx.lineTo(centerX + 5, centerY - maxRadius + 30);
-    ctx.closePath();
-    ctx.fill();
-
-    // Draw user position (center dot)
-    ctx.fillStyle = "#00ff00";
-    ctx.beginPath();
-    ctx.arc(centerX, centerY, 5, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Draw user heading line
-    const headingRad = userHeading * Math.PI / 180;
-    ctx.strokeStyle = "rgba(0, 255, 0, 0.5)";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(centerX, centerY);
-    ctx.lineTo(
-      centerX + Math.sin(headingRad) * maxRadius * 0.8,
-      centerY - Math.cos(headingRad) * maxRadius * 0.8
-    );
-    ctx.stroke();
-
-    // Draw objects as dots
-    nearbyObjects.forEach(obj => {
-      const objectBearing = obj.bearing * Math.PI / 180;
-      const objectDistance = (obj.distance / 100) * maxRadius;
-
-      const x = centerX + Math.sin(objectBearing) * objectDistance;
-      const y = centerY - Math.cos(objectBearing) * objectDistance;
-
-      ctx.fillStyle = obj.color;
-      ctx.beginPath();
-      ctx.arc(x, y, 8, 0, Math.PI * 2);
-      ctx.fill();
-
-      ctx.strokeStyle = "white";
-      ctx.lineWidth = 2;
-      ctx.stroke();
-
-      ctx.fillStyle = "white";
-      ctx.font = "bold 10px Arial";
-      ctx.textAlign = "center";
-      ctx.fillText(obj.name.substring(0, 3), x, y + 15);
-    });
-
-  }, [nearbyObjects, userHeading]);
-
-  const requestPermissions = async () => {
-    setLoading(true);
-    setError(null);
-    addDebugLog("Starting permission request...");
-
-    try {
-      // Check if running on HTTPS (required for most sensors)
-      addDebugLog(`Protocol: ${window.location.protocol}`);
-      
-      // Request camera permission
-      addDebugLog("Requesting camera permission...");
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { facingMode: "environment" } 
-      });
-      stream.getTracks().forEach(track => track.stop());
-      addDebugLog("✓ Camera permission granted");
-      
-      // Request GPS permission
-      addDebugLog("Requesting GPS permission...");
-      const position = await new Promise((res, rej) => {
-        navigator.geolocation.getCurrentPosition(res, rej, {
-          enableHighAccuracy: true,
-          timeout: 15000,
-        });
-      });
-      addDebugLog(`✓ GPS granted: ${position.coords.latitude.toFixed(4)}, ${position.coords.longitude.toFixed(4)}`);
-
-      setGpsLocation({
-        lat: position.coords.latitude,
-        lon: position.coords.longitude,
-      });
-
-      // Request device orientation permission (iOS)
-      if (typeof DeviceOrientationEvent !== "undefined" && 
-          typeof DeviceOrientationEvent.requestPermission === "function") {
-        addDebugLog("Requesting device orientation permission (iOS)...");
-        try {
-          const permissionState = await DeviceOrientationEvent.requestPermission();
-          if (permissionState === "granted") {
-            addDebugLog("✓ Device orientation granted");
-          } else {
-            addDebugLog("⚠ Device orientation denied", "warn");
-          }
-        } catch (err) {
-          addDebugLog(`Device orientation error: ${err.message}`, "warn");
-        }
-      } else {
-        addDebugLog("Device orientation auto-granted (Android)");
+    const handle = (e) => {
+      let newHeading;
+      if (e.webkitCompassHeading != null) {
+        newHeading = e.webkitCompassHeading;
+      } else if (e.alpha != null) {
+        newHeading = 360 - e.alpha;
       }
 
-      findNearbyObjects(position.coords.latitude, position.coords.longitude);
-      setPermissionsGranted(true);
-      setReadyForAR(true);
-      setLoading(false);
-      addDebugLog("✓ All permissions granted, ready for AR");
+      if (typeof newHeading === "number") {
+        // Smooth heading to reduce jitter
+        const smoothHeading =
+          lastHeadingRef.current + (newHeading - lastHeadingRef.current) * 0.1;
 
-    } catch (err) {
-      const errorMsg = `Error: ${err.message}`;
-      setError(errorMsg);
-      setLoading(false);
-      addDebugLog(errorMsg, "error");
-      alert(errorMsg);
-    }
-  };
-
-  // GPS polling
-  useEffect(() => {
-    if (!permissionsGranted) return;
-
-    const gpsInterval = setInterval(() => {
-      navigator.geolocation.getCurrentPosition(
-        (position) => {
-          setGpsLocation({
-            lat: position.coords.latitude,
-            lon: position.coords.longitude,
-          });
-          findNearbyObjects(position.coords.latitude, position.coords.longitude);
-        }
-      );
-    }, 5000);
-
-    return () => clearInterval(gpsInterval);
-  }, [permissionsGranted]);
-
-  // Device orientation (for heading)
-  useEffect(() => {
-    if (!permissionsGranted) return;
-
-    const handleOrientation = (event) => {
-      let heading = event.alpha || 0;
-      if (event.webkitCompassHeading) {
-        heading = event.webkitCompassHeading;
+        lastHeadingRef.current = smoothHeading;
+        headingRef.current = smoothHeading;
       }
-      setUserHeading(heading);
     };
 
-    window.addEventListener("deviceorientation", handleOrientation);
-    addDebugLog("Device orientation listener added");
+    window.addEventListener("deviceorientationabsolute", handle, true);
+    window.addEventListener("deviceorientation", handle, true);
 
     return () => {
-      window.removeEventListener("deviceorientation", handleOrientation);
-      addDebugLog("Device orientation listener removed");
+      window.removeEventListener("deviceorientationabsolute", handle);
+      window.removeEventListener("deviceorientation", handle);
     };
-  }, [permissionsGranted]);
+  }, []);
 
-  // AR Start function
-  const startAR = async () => {
-    if (!readyForAR || arActive) {
-      addDebugLog("AR already active or not ready", "warn");
-      return;
+  // ---------------- GPS POLLING ----------------
+  useEffect(() => {
+    const poll = () => {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          userGpsRef.current = {
+            lat: pos.coords.latitude,
+            lon: pos.coords.longitude,
+          };
+          if (!gpsReady) {
+            setGpsReady(true);
+            setLoadingMessage("");
+          }
+          updateModels();
+        },
+        (error) => {
+          setLoadingMessage("GPS Error: " + error.message);
+        },
+        { enableHighAccuracy: true, timeout: 100000 },
+      );
+    };
+
+    poll();
+    const id = setInterval(poll, 3000);
+    return () => clearInterval(id);
+  }, [gpsReady]);
+
+  // ---------------- THREE SETUP ----------------
+  useEffect(() => {
+    // Remove existing AR button if any (prevent duplicates)
+    if (arButtonRef.current) {
+      arButtonRef.current.remove();
+      arButtonRef.current = null;
     }
 
-    if (!threeLoaded || !window.THREE) {
-      addDebugLog("Three.js not loaded yet, please wait...", "warn");
-      return;
-    }
-
-    addDebugLog("=== STARTING AR SESSION ===");
-    
-    try {
-      setLoading(true);
-      
-      // Check WebXR availability
-      addDebugLog("Checking WebXR availability...");
-      if (!navigator.xr) {
-        throw new Error("WebXR not available (Chrome 79+ required, HTTPS required)");
-      }
-      addDebugLog("✓ WebXR available");
-
-      // Check AR support
-      addDebugLog("Checking AR session support...");
-      const isARSupported = await navigator.xr.isSessionSupported("immersive-ar");
-      addDebugLog(`AR Supported: ${isARSupported}`);
-      
-      if (!isARSupported) {
-        throw new Error("AR (immersive-ar) not supported on this device. Try Chrome on Android ARCore device.");
-      }
-      addDebugLog("✓ AR session supported");
-
-      // Get canvas
-      const canvas = canvasRef.current;
-      if (!canvas) {
-        throw new Error("Canvas element not found");
-      }
-      addDebugLog("✓ Canvas found");
-
-      // Create WebGL context
-      addDebugLog("Creating WebGL2 context...");
-      const gl = canvas.getContext("webgl2", { xrCompatible: true });
-      if (!gl) {
-        throw new Error("WebGL2 not supported");
-      }
-      addDebugLog("✓ WebGL2 context created");
-
-      // Request AR session
-      addDebugLog("Requesting AR session...");
-      const sessionInit = {
-        requiredFeatures: ["local"],
-        optionalFeatures: ["dom-overlay", "hit-test"],
-        domOverlay: { root: document.body }
-      };
-      addDebugLog(`Session config: ${JSON.stringify(sessionInit)}`);
-
-      const session = await navigator.xr.requestSession("immersive-ar", sessionInit);
-      sessionRef.current = session;
-      addDebugLog("✓ AR session created!");
-
-      // Session end handler
-      session.addEventListener("end", () => {
-        addDebugLog("AR session ended");
-        setArActive(false);
-      });
-
-      // Create XR layer
-      addDebugLog("Creating XR WebGL layer...");
-      const baseLayer = new XRWebGLLayer(session, gl, {
-        alpha: true,
-        antialias: true,
-        framebufferScaleFactor: 1
-      });
-      await session.updateRenderState({ baseLayer });
-      addDebugLog("✓ XR layer created");
-
-      // Get reference space
-      addDebugLog("Requesting reference space...");
-      const referenceSpace = await session.requestReferenceSpace("local");
-      addDebugLog("✓ Reference space created");
-
-      // Hit test (optional)
-      let hitTestSource = null;
-      try {
-        addDebugLog("Requesting hit test source...");
-        hitTestSource = await session.requestHitTestSource({
-          space: referenceSpace
-        });
-        addDebugLog("✓ Hit test source created");
-      } catch (err) {
-        addDebugLog(`Hit test not available: ${err.message}`, "warn");
-      }
-
-      setupRendering(session, gl, referenceSpace, hitTestSource);
-      setArActive(true);
-      setLoading(false);
-      addDebugLog("🎉 AR SESSION ACTIVE!");
-
-    } catch (err) {
-      const errorMsg = `AR Error: ${err.message}`;
-      setError(errorMsg);
-      setLoading(false);
-      addDebugLog(errorMsg, "error");
-      addDebugLog(`Error stack: ${err.stack}`, "error");
-      console.error("Full AR error:", err);
-    }
-  };
-
-  const setupRendering = (session, gl, referenceSpace, hitTestSource) => {
-    addDebugLog("Setting up Three.js scene...");
-    
-    if (!window.THREE) {
-      addDebugLog("Three.js not loaded!", "error");
-      return;
-    }
-
-    const THREE = window.THREE;
-
-    // Create Three.js scene
     const scene = new THREE.Scene();
-    sceneRef.current = scene;
-    addDebugLog("✓ Scene created");
+    const camera = new THREE.PerspectiveCamera();
 
-    // Create camera (will be updated by XR)
-    const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
-    cameraRef.current = camera;
-    addDebugLog("✓ Camera created");
-
-    // Create renderer using existing canvas and GL context
     const renderer = new THREE.WebGLRenderer({
       canvas: canvasRef.current,
-      context: gl,
       alpha: true,
-      preserveDrawingBuffer: true,
-      antialias: true
+      antialias: true,
     });
-    renderer.autoClear = false;
-    renderer.setPixelRatio(window.devicePixelRatio);
-    renderer.setSize(window.innerWidth, window.innerHeight);
+
     renderer.xr.enabled = true;
-    renderer.xr.setReferenceSpaceType('local');
-    renderer.xr.setSession(session);
+    scene.add(new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1));
+
+    sceneRef.current = scene;
     rendererRef.current = renderer;
-    addDebugLog("✓ Renderer configured for XR");
 
-    // Add lighting
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
-    scene.add(ambientLight);
-    
-    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-    directionalLight.position.set(0, 10, 10);
-    scene.add(directionalLight);
-    addDebugLog("✓ Lighting added");
-
-    // Create reticle (placement indicator)
-    const reticleGeometry = new THREE.RingGeometry(0.15, 0.2, 32).rotateX(-Math.PI / 2);
-    const reticleMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
-    const reticle = new THREE.Mesh(reticleGeometry, reticleMaterial);
-    reticle.matrixAutoUpdate = false;
-    reticle.visible = false;
-    scene.add(reticle);
-    reticleRef.current = reticle;
-    addDebugLog("✓ Reticle created");
-
-    // Auto-place objects based on GPS when reticle is first detected
-    let objectsPlaced = false;
-
-    // Animation loop
-    renderer.setAnimationLoop((time, frame) => {
-      if (!frame) return;
-
-      const pose = frame.getViewerPose(referenceSpace);
-      if (pose) {
-        // Handle hit test for placement
-        if (hitTestSource && !objectsPlaced) {
-          const hitTestResults = frame.getHitTestResults(hitTestSource);
-          if (hitTestResults.length > 0) {
-            const hit = hitTestResults[0];
-            const hitPose = hit.getPose(referenceSpace);
-            
-            if (hitPose) {
-              // Show reticle at hit location
-              reticle.visible = true;
-              reticle.matrix.fromArray(hitPose.transform.matrix);
-
-              // Auto-place objects on first hit
-              if (!objectsPlaced) {
-                placeObjectsInAR(hitPose, scene, THREE);
-                objectsPlaced = true;
-                addDebugLog(`✓ Placed ${nearbyObjects.length} objects in AR!`);
-              }
-            }
-          }
-        }
-
-        // Render the scene for each view
-        renderer.render(scene, camera);
-      }
-    });
-
-    addDebugLog("✓ Animation loop started with Three.js");
-  };
-
-  // Place AR objects based on GPS coordinates
-  const placeObjectsInAR = (hitPose, scene, THREE) => {
-    nearbyObjects.forEach((obj, index) => {
-      // Calculate position offset based on bearing and distance
-      const bearingRad = obj.bearing * Math.PI / 180;
-      const distanceScale = obj.distance / 100; // Scale down for AR view
-      
-      const xOffset = Math.sin(bearingRad) * distanceScale;
-      const zOffset = -Math.cos(bearingRad) * distanceScale;
-
-      // Create a simple geometric object (since we can't load GLB files easily)
-      let geometry;
-      switch(obj.id) {
-        case "tclogo":
-          geometry = new THREE.BoxGeometry(0.2, 0.2, 0.2);
-          break;
-        case "gold_coin":
-          geometry = new THREE.CylinderGeometry(0.15, 0.15, 0.05, 32);
-          break;
-        case "shiva_foods":
-          geometry = new THREE.SphereGeometry(0.15, 32, 32);
-          break;
-        default:
-          geometry = new THREE.BoxGeometry(0.2, 0.2, 0.2);
-      }
-
-      const material = new THREE.MeshStandardMaterial({ 
-        color: obj.color,
-        metalness: 0.3,
-        roughness: 0.4,
-        emissive: obj.color,
-        emissiveIntensity: 0.2
+    // Only create AR button when GPS is ready
+    if (gpsReady) {
+      const arButton = ARButton.createButton(renderer, {
+        requiredFeatures: ["hit-test"],
+        optionalFeatures: ["dom-overlay"],
+        domOverlay: { root: overlayRef.current },
       });
-      
-      const mesh = new THREE.Mesh(geometry, material);
-      
-      // Position based on hit pose + GPS offset
-      mesh.position.set(
-        hitPose.transform.position.x + xOffset,
-        hitPose.transform.position.y + 0.3, // Raise objects up
-        hitPose.transform.position.z + zOffset
-      );
-      
-      // Add some rotation for visual interest
-      mesh.rotation.y = Math.random() * Math.PI * 2;
-      
-      scene.add(mesh);
-      placedObjectsRef.current.push({ mesh, obj });
+      arButtonRef.current = arButton;
+      document.body.appendChild(arButton);
+    }
 
-      addDebugLog(`Placed ${obj.name} at offset (${xOffset.toFixed(2)}, ${zOffset.toFixed(2)})`);
+    renderer.setAnimationLoop(() => {
+      renderer.render(scene, renderer.xr.getCamera(camera));
+      drawRadar(); // draw every frame
     });
-  };
+
+    return () => {
+      // Cleanup on unmount
+      if (arButtonRef.current) {
+        arButtonRef.current.remove();
+        arButtonRef.current = null;
+      }
+      renderer.setAnimationLoop(null);
+      renderer.dispose();
+    };
+  }, [gpsReady]);
+
+  // ---------------- SHOW / HIDE MODELS (<15m) ----------------
+  async function updateModels() {
+    const user = userGpsRef.current;
+    if (!user) return;
+
+    for (const obj of AR_OBJECTS) {
+      const dist = getDistance(user, obj);
+
+      if (dist < 15 && !modelsRef.current[obj.id]) {
+        const gltf = await loader.current.loadAsync(obj.model);
+        const model = gltf.scene;
+        model.position.set(0, 0, -2);
+        model.scale.set(0.4, 0.4, 0.4);
+        sceneRef.current.add(model);
+        modelsRef.current[obj.id] = model;
+      }
+
+      if (dist >= 15 && modelsRef.current[obj.id]) {
+        sceneRef.current.remove(modelsRef.current[obj.id]);
+        delete modelsRef.current[obj.id];
+      }
+    }
+  }
+
+  // ---------------- RADAR DRAW ----------------
+  function drawRadar() {
+    const canvas = radarCanvasRef.current;
+    if (!canvas) return;
+
+    const ctx = canvas.getContext("2d");
+    const size = canvas.width;
+    const center = size / 2;
+    const radius = center - 10;
+    const heading = headingRef.current;
+
+    ctx.clearRect(0, 0, size, size);
+
+    // Background gradient
+    const bgGradient = ctx.createRadialGradient(
+      center,
+      center,
+      0,
+      center,
+      center,
+      radius,
+    );
+    bgGradient.addColorStop(0, "rgba(0, 20, 10, 0.9)");
+    bgGradient.addColorStop(1, "rgba(0, 10, 5, 0.95)");
+    ctx.beginPath();
+    ctx.arc(center, center, radius, 0, Math.PI * 2);
+    ctx.fillStyle = bgGradient;
+    ctx.fill();
+
+    // Range rings (25m and 50m)
+    ctx.strokeStyle = "rgba(0, 255, 100, 0.3)";
+    ctx.lineWidth = 1;
+
+    // 25m ring
+    ctx.beginPath();
+    ctx.arc(center, center, radius / 2, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 50m ring (outer)
+    ctx.beginPath();
+    ctx.arc(center, center, radius, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(0, 255, 100, 0.5)";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Cross lines
+    ctx.strokeStyle = "rgba(0, 255, 100, 0.2)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(center, center - radius);
+    ctx.lineTo(center, center + radius);
+    ctx.moveTo(center - radius, center);
+    ctx.lineTo(center + radius, center);
+    ctx.stroke();
+
+    // Cardinal directions (N, S, E, W) - FIXED, don't rotate
+    const cardinals = [
+      { label: "N", angle: 0, color: "#ff4444" },
+      { label: "E", angle: 90, color: "#00ff88" },
+      { label: "S", angle: 180, color: "#00ff88" },
+      { label: "W", angle: 270, color: "#00ff88" },
+    ];
+
+    ctx.font = "bold 12px Arial";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+
+    for (const dir of cardinals) {
+      const angleRad = (dir.angle * Math.PI) / 180;
+      const labelRadius = radius - 12;
+      const x = center + Math.sin(angleRad) * labelRadius;
+      const y = center - Math.cos(angleRad) * labelRadius;
+      ctx.fillStyle = dir.color;
+      ctx.fillText(dir.label, x, y);
+    }
+
+    // Direction needle - ROTATES based on heading
+    ctx.save();
+    ctx.translate(center, center);
+    ctx.rotate((heading * Math.PI) / 180); // Rotate needle based on heading
+
+    // Needle triangle pointing up (rotates with heading)
+    ctx.beginPath();
+    ctx.moveTo(0, -radius + 20);
+    ctx.lineTo(-8, 0);
+    ctx.lineTo(8, 0);
+    ctx.closePath();
+    ctx.fillStyle = "#00ff88";
+    ctx.fill();
+
+    // Needle back (opposite direction)
+    ctx.beginPath();
+    ctx.moveTo(0, radius - 30);
+    ctx.lineTo(-5, 0);
+    ctx.lineTo(5, 0);
+    ctx.closePath();
+    ctx.fillStyle = "rgba(0, 255, 100, 0.3)";
+    ctx.fill();
+
+    ctx.restore();
+
+    // Objects (red dots for items within 50m) - FIXED positions (not rotated)
+    if (userGpsRef.current) {
+      const scale = radius / 50;
+      for (const obj of AR_OBJECTS) {
+        const { x, y, dist } = getXY(userGpsRef.current, obj);
+        if (dist > 50) continue;
+
+        // Fixed position - no rotation, shows actual world location
+        // x = East/West, y = North/South
+        const dotX = center + x * scale;
+        const dotY = center - y * scale; // Y inverted because canvas Y goes down
+
+        // Glow effect
+        ctx.beginPath();
+        ctx.arc(dotX, dotY, 8, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(255, 0, 0, 0.3)";
+        ctx.fill();
+
+        // Red dot
+        ctx.beginPath();
+        ctx.arc(dotX, dotY, 5, 0, Math.PI * 2);
+        ctx.fillStyle = "#ff3333";
+        ctx.fill();
+
+        // Dot border
+        ctx.strokeStyle = "#ff6666";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+    }
+
+    // User dot (center)
+    ctx.beginPath();
+    ctx.arc(center, center, 6, 0, Math.PI * 2);
+    ctx.fillStyle = "#00ff88";
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(center, center, 3, 0, Math.PI * 2);
+    ctx.fillStyle = "white";
+    ctx.fill();
+
+    // Range label
+    ctx.font = "9px Arial";
+    ctx.fillStyle = "rgba(0, 255, 100, 0.6)";
+    ctx.textAlign = "right";
+    ctx.fillText("50m", center + radius - 5, center + 10);
+    ctx.fillText("25m", center + radius / 2 - 3, center + 10);
+  }
+
+  // ---------------- MATH ----------------
+  function getXY(a, b) {
+    const R = 6371000;
+    const dLat = (b.lat - a.lat) * (Math.PI / 180);
+    const dLon = (b.lon - a.lon) * (Math.PI / 180);
+
+    const x = dLon * Math.cos(((a.lat + b.lat) / 2) * (Math.PI / 180)) * R;
+    const y = dLat * R;
+
+    return { x, y, dist: Math.sqrt(x * x + y * y) };
+  }
+
+  function getDistance(a, b) {
+    const { dist } = getXY(a, b);
+    return dist;
+  }
 
   return (
-    <div className="w-screen h-screen relative overflow-hidden bg-black">
-      {/* Debug Console - Always visible */}
-      <div className="absolute bottom-0 left-0 right-0 bg-black/95 text-white p-2 text-xs font-mono border-t-2 border-green-500 max-h-48 overflow-y-auto z-50">
-        <div className="font-bold text-green-400 mb-1">🔍 DEBUG CONSOLE</div>
-        {debugLogs.length === 0 ? (
-          <div className="text-gray-500">No logs yet...</div>
-        ) : (
-          debugLogs.map((log, idx) => (
-            <div 
-              key={idx} 
-              className={`${
-                log.type === 'error' ? 'text-red-400' : 
-                log.type === 'warn' ? 'text-yellow-400' : 
-                'text-green-300'
-              }`}
-            >
-              [{log.timestamp}] {log.message}
-            </div>
-          ))
-        )}
-      </div>
+    <div className="w-screen h-screen relative">
+      <canvas ref={canvasRef} className="w-full h-full" />
 
-      {/* Permission Screen */}
-      {!permissionsGranted && !loading && (
-        <div className="h-full flex flex-col justify-center items-center gap-6 px-6 pb-52">
-          <h2 className="text-3xl font-bold text-center text-white">🌍 AR GPS Hunt</h2>
-          <p className="text-center text-gray-300 max-w-md">
-            Walk around to find virtual objects at fixed GPS coordinates
-          </p>
-
-          {error && (
-            <div className="bg-red-900 border-2 border-red-500 text-red-200 p-4 rounded-lg max-w-md w-full text-sm">
-              {error}
-            </div>
-          )}
-
-          <button
-            onClick={requestPermissions}
-            className="bg-blue-600 hover:bg-blue-700 px-8 py-4 rounded-xl text-white font-bold transition text-lg w-full max-w-xs"
-          >
-            🎯 Grant Permissions & Start
-          </button>
-
-          <div className="text-gray-400 text-xs max-w-md bg-gray-900 p-4 rounded-lg border border-gray-700">
-            <p className="mb-2 font-bold text-gray-300">Requirements:</p>
-            <ul className="space-y-1">
-              <li>📱 Chrome 79+ on Android</li>
-              <li>🔒 HTTPS connection required</li>
-              <li>📹 Camera permission</li>
-              <li>📍 GPS/Location permission</li>
-              <li>🧭 Device orientation (auto on Android)</li>
-              <li>🎯 ARCore compatible device</li>
-            </ul>
-          </div>
-        </div>
-      )}
-
-      {/* Loading Screen */}
-      {loading && !arActive && (
-        <div className="h-full flex flex-col justify-center items-center pb-52">
-          <Loader2 className="animate-spin w-12 h-12 text-blue-600 mb-4" />
-          <p className="text-gray-300">
-            {permissionsGranted ? "Starting AR..." : "Getting permissions & GPS location..."}
-          </p>
-        </div>
-      )}
-
-      {/* Ready for AR Screen */}
-      {readyForAR && !arActive && !loading && (
-        <div className="h-full flex flex-col justify-center items-center gap-6 px-6 bg-gradient-to-b from-gray-900 to-black pb-52">
-          <div className="text-center">
-            <h2 className="text-3xl font-bold text-white mb-4">🎯 Ready for AR!</h2>
-            <p className="text-gray-300 mb-2">Found {nearbyObjects.length} objects nearby</p>
-            <p className="text-sm text-gray-400">📍 {gpsLocation.lat?.toFixed(6)}, {gpsLocation.lon?.toFixed(6)}</p>
-          </div>
-
-          {nearbyObjects.length > 0 && (
-            <div className="bg-gray-800 p-4 rounded-lg border border-cyan-500 max-w-sm">
-              <p className="font-bold text-cyan-400 mb-2">Nearby Objects:</p>
-              {nearbyObjects.map((obj, idx) => (
-                <div key={obj.id} className="text-sm text-gray-300 mb-1">
-                  <span style={{ color: obj.color }}>●</span> {obj.name} - {obj.distance.toFixed(1)}m away
-                </div>
-              ))}
-            </div>
-          )}
-
-          <button
-            onClick={startAR}
-            disabled={!threeLoaded}
-            className={`${threeLoaded ? 'bg-green-600 hover:bg-green-700' : 'bg-gray-600 cursor-not-allowed'} px-12 py-6 rounded-xl text-white font-bold transition text-xl shadow-lg`}
-          >
-            {threeLoaded ? '🚀 Start AR Experience' : '⏳ Loading 3D Engine...'}
-          </button>
-
-          <p className="text-xs text-gray-500 max-w-xs text-center">
-            Make sure you're on Chrome with ARCore support
-          </p>
-        </div>
-      )}
-
-      {/* AR Canvas - Always rendered, hidden when not active */}
-      <canvas
-        ref={canvasRef}
-        className="w-full h-full"
-        style={{ display: arActive ? "block" : "none" }}
-      />
-
-      {/* Radar Canvas - Always rendered for GPS mode and AR mode */}
-      {(readyForAR || arActive) && (
-        <div className="absolute top-5 right-5 bg-black/95 p-3 rounded-lg border-2 border-green-500 shadow-lg z-30"
-          style={{ width: "200px", height: "200px" }}>
-          <canvas
-            ref={radarCanvasRef}
-            width={190}
-            height={190}
-            className="w-full h-full"
-            style={{ display: "block" }}
+      {/* Loading overlay - shown until GPS is ready */}
+      {!gpsReady && (
+        <div
+          style={{
+            position: "absolute",
+            top: 0,
+            left: 0,
+            width: "100%",
+            height: "100%",
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "rgba(0, 0, 0, 0.85)",
+            zIndex: 100,
+          }}
+        >
+          {/* Spinner */}
+          <div
+            style={{
+              width: 50,
+              height: 50,
+              border: "4px solid rgba(0, 255, 100, 0.3)",
+              borderTop: "4px solid #00ff88",
+              borderRadius: "50%",
+              animation: "spin 1s linear infinite",
+            }}
           />
-          <div className="text-green-400 text-xs font-bold mt-1 text-center">RADAR</div>
+          <p
+            style={{
+              marginTop: 20,
+              color: "#00ff88",
+              fontSize: 16,
+              fontFamily: "Arial, sans-serif",
+            }}
+          >
+            {loadingMessage}
+          </p>
+          <style>{`
+            @keyframes spin {
+              0% { transform: rotate(0deg); }
+              100% { transform: rotate(360deg); }
+            }
+          `}</style>
         </div>
       )}
 
-      {/* AR UI Overlays */}
-      {arActive && (
-        <>
-          {/* AR Overlay UI */}
-          <div className="absolute inset-0 pointer-events-none pb-52">
-            {/* Top Left - Current Location */}
-            <div className="absolute top-5 left-5 bg-black/90 text-white p-4 rounded-lg pointer-events-auto max-w-xs text-xs border border-green-500">
-              <div className="font-bold text-green-400 mb-2">● LIVE AR (GPS + RADAR)</div>
-              <p className="text-gray-300 mb-1">📍 Your Position:</p>
-              <p className="font-mono text-xs text-gray-400 mb-2">
-                {gpsLocation.lat?.toFixed(6)}, {gpsLocation.lon?.toFixed(6)}
-              </p>
-              <p className="text-gray-300 mb-1">🧭 Heading: {userHeading.toFixed(0)}°</p>
-              <p className="text-gray-300 text-xs">{debug}</p>
-            </div>
-
-            {/* Bottom Left - Instructions */}
-            <div className="absolute bottom-5 left-5 bg-white/95 text-black p-4 rounded-lg pointer-events-auto text-xs max-w-xs">
-              <p className="font-bold mb-2">🎮 How to use Radar:</p>
-              <ul className="space-y-1 text-gray-700 text-xs">
-                <li>🟢 Green circle = You (center)</li>
-                <li>🔴 Colored dots = Objects</li>
-                <li>📏 Rings = Distance (25m, 50m, 75m, 100m)</li>
-                <li>🧭 Arrow = Your heading (north)</li>
-                <li>↑ Walk towards objects on radar</li>
-              </ul>
-            </div>
-
-            {/* Bottom Right - Nearby Objects List */}
-            <div className="absolute bottom-5 right-5 bg-black/90 text-white p-4 rounded-lg pointer-events-auto max-w-xs border border-cyan-500 max-h-40 overflow-y-auto">
-              <div className="font-bold text-cyan-400 mb-2">🎯 Objects ({nearbyObjects.length})</div>
-              {nearbyObjects.length === 0 ? (
-                <p className="text-gray-400 text-xs">No objects nearby</p>
-              ) : (
-                <div className="space-y-2">
-                  {nearbyObjects.map((obj, idx) => (
-                    <div key={obj.id} className="bg-gray-800 p-2 rounded border-l-4" style={{ borderColor: obj.color }}>
-                      <div className="font-bold text-sm" style={{ color: obj.color }}>{idx + 1}. {obj.name}</div>
-                      <div className="text-xs text-gray-300 mt-1">
-                        <div>📏 <strong>{obj.distance.toFixed(1)}m</strong></div>
-                        <div>🧭 {obj.bearing.toFixed(0)}°</div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* Status Bar */}
-            <div className="absolute top-5 left-1/2 transform -translate-x-1/2 flex gap-2">
-              <div className="bg-green-500/90 text-white p-3 rounded-lg pointer-events-auto text-xs">
-                <div className="font-bold">📹 AR ACTIVE</div>
-              </div>
-            </div>
-          </div>
-        </>
-      )}
-      {error && arActive && (
-        <div className="absolute top-5 right-5 bg-red-600 text-white p-4 rounded-lg pointer-events-auto flex items-center gap-2 text-sm max-w-xs border border-red-400 z-40">
-          <AlertCircle className="w-5 h-5" />
-          {error}
-        </div>
-      )}
+      {/* DOM Overlay container for WebXR */}
+      <div
+        ref={overlayRef}
+        style={{
+          position: "absolute",
+          top: 0,
+          left: 0,
+          width: "100%",
+          height: "100%",
+          pointerEvents: "none",
+        }}
+      >
+        {/* Radar Canvas HUD */}
+        <canvas
+          ref={radarCanvasRef}
+          width={140}
+          height={140}
+          style={{
+            position: "absolute",
+            top: 20,
+            right: 20,
+            zIndex: 10,
+            background: "rgba(0,0,0,0.6)",
+            borderRadius: "50%",
+            pointerEvents: "auto",
+          }}
+        />
+      </div>
     </div>
   );
-};
-
-export default ARGame;
+}
