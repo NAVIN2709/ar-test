@@ -4,6 +4,7 @@ import React, { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { ARButton } from "three/examples/jsm/webxr/ARButton.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { DRACOLoader } from "three/examples/jsm/loaders/DRACOLoader.js";
 
 const AR_OBJECTS = [
   {
@@ -19,7 +20,26 @@ const AR_OBJECTS = [
     lat: 10.7678,
     lon: 78.8134,
   },
+  {
+    id: "tclogo2",
+    name: "TC Logo 2",
+    model: "/models/tc.glb",
+    lat: 10.76668,
+    lon: 78.81745,
+  },
 ];
+
+// ============================================
+// LOW-QUALITY OPTIMIZATION SETTINGS
+// ============================================
+const QUALITY_SETTINGS = {
+  pixelRatio: 0.5, // Half resolution (can go lower for more performance)
+  antialias: false, // Disable anti-aliasing
+  precision: "lowp", // Low precision math
+  powerPreference: "low-power", // GPU hint
+  radarFrameSkip: 4, // Redraw radar every 4 frames (15 FPS instead of 60)
+  maxDrawDistance: 15, // Don't render models beyond 15m
+};
 
 export default function ARGame() {
   const canvasRef = useRef();
@@ -31,17 +51,32 @@ export default function ARGame() {
   const rendererRef = useRef();
   const loader = useRef(new GLTFLoader());
   const modelsRef = useRef({});
+  const gradientCacheRef = useRef({}); // Cache gradients
 
   const headingRef = useRef(0);
   const lastHeadingRef = useRef(0);
   const userGpsRef = useRef(null);
+  const frameCounterRef = useRef(0); // For throttling
 
   const [gpsReady, setGpsReady] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState(
     "Acquiring GPS position...",
   );
 
-  // ---------------- DEVICE HEADING (with smoothing) ----------------
+  // ============================================
+  // SETUP DRACO COMPRESSION
+  // ============================================
+  useEffect(() => {
+    const dracoLoader = new DRACOLoader();
+    dracoLoader.setDecoderPath(
+      "https://www.gstatic.com/draco/versioned/decoders/1.5.6/",
+    );
+    loader.current.setDRACOLoader(dracoLoader);
+  }, []);
+
+  // ============================================
+  // DEVICE HEADING (with smoothing)
+  // ============================================
   useEffect(() => {
     const handle = (e) => {
       let newHeading;
@@ -52,10 +87,8 @@ export default function ARGame() {
       }
 
       if (typeof newHeading === "number") {
-        // Smooth heading to reduce jitter
         const smoothHeading =
           lastHeadingRef.current + (newHeading - lastHeadingRef.current) * 0.1;
-
         lastHeadingRef.current = smoothHeading;
         headingRef.current = smoothHeading;
       }
@@ -70,7 +103,9 @@ export default function ARGame() {
     };
   }, []);
 
-  // ---------------- GPS POLLING ----------------
+  // ============================================
+  // GPS POLLING
+  // ============================================
   useEffect(() => {
     const poll = () => {
       navigator.geolocation.getCurrentPosition(
@@ -97,9 +132,10 @@ export default function ARGame() {
     return () => clearInterval(id);
   }, [gpsReady]);
 
-  // ---------------- THREE SETUP ----------------
+  // ============================================
+  // THREE SETUP WITH LOW-QUALITY OPTIMIZATION
+  // ============================================
   useEffect(() => {
-    // Remove existing AR button if any (prevent duplicates)
     if (arButtonRef.current) {
       arButtonRef.current.remove();
       arButtonRef.current = null;
@@ -108,19 +144,33 @@ export default function ARGame() {
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera();
 
+    // ✅ LOW-QUALITY RENDERER SETTINGS
     const renderer = new THREE.WebGLRenderer({
       canvas: canvasRef.current,
       alpha: true,
-      antialias: true,
+      antialias: QUALITY_SETTINGS.antialias, // false
+      precision: QUALITY_SETTINGS.precision, // "lowp"
+      powerPreference: QUALITY_SETTINGS.powerPreference, // "low-power"
     });
 
+    // ✅ REDUCE PIXEL RATIO (Main performance boost)
+    renderer.setPixelRatio(QUALITY_SETTINGS.pixelRatio); // 0.5x resolution
+    renderer.setSize(window.innerWidth, window.innerHeight, false);
+
+    // ✅ DISABLE EXPENSIVE FEATURES
+    renderer.shadowMap.enabled = false; // No shadow rendering
+    renderer.shadowMap.type = THREE.BasicShadowMap;
+    renderer.autoClear = true;
+
     renderer.xr.enabled = true;
-    scene.add(new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1));
+
+    // ✅ USE CHEAP AMBIENT LIGHT ONLY
+    // HemisphereLight is more expensive than AmbientLight
+    scene.add(new THREE.AmbientLight(0xffffff, 0.6)); // Reduced intensity
 
     sceneRef.current = scene;
     rendererRef.current = renderer;
 
-    // Only create AR button when GPS is ready
     if (gpsReady) {
       const arButton = ARButton.createButton(renderer, {
         requiredFeatures: ["hit-test"],
@@ -131,13 +181,18 @@ export default function ARGame() {
       document.body.appendChild(arButton);
     }
 
+    // ✅ THROTTLED ANIMATION LOOP
     renderer.setAnimationLoop(() => {
       renderer.render(scene, renderer.xr.getCamera(camera));
-      drawRadar(); // draw every frame
+
+      // Only redraw radar every N frames
+      if (frameCounterRef.current % QUALITY_SETTINGS.radarFrameSkip === 0) {
+        drawRadar();
+      }
+      frameCounterRef.current++;
     });
 
     return () => {
-      // Cleanup on unmount
       if (arButtonRef.current) {
         arButtonRef.current.remove();
         arButtonRef.current = null;
@@ -147,7 +202,9 @@ export default function ARGame() {
     };
   }, [gpsReady]);
 
-  // ---------------- SHOW / HIDE MODELS (<15m) ----------------
+  // ============================================
+  // SHOW / HIDE MODELS (optimized)
+  // ============================================
   async function updateModels() {
     const user = userGpsRef.current;
     if (!user) return;
@@ -155,28 +212,77 @@ export default function ARGame() {
     for (const obj of AR_OBJECTS) {
       const dist = getDistance(user, obj);
 
-      if (dist < 15 && !modelsRef.current[obj.id]) {
-        const gltf = await loader.current.loadAsync(obj.model);
-        const model = gltf.scene;
-        model.position.set(0, 0, -2);
-        model.scale.set(0.4, 0.4, 0.4);
-        sceneRef.current.add(model);
-        modelsRef.current[obj.id] = model;
+      if (dist < QUALITY_SETTINGS.maxDrawDistance && !modelsRef.current[obj.id]) {
+        try {
+          const gltf = await loader.current.loadAsync(obj.model);
+          const model = gltf.scene;
+
+          // ✅ OPTIMIZE GEOMETRY
+          model.traverse((child) => {
+            if (child.isMesh) {
+              // Remove expensive attributes
+              if (child.geometry.attributes.normal)
+                child.geometry.deleteAttribute("normal");
+              if (child.geometry.attributes.uv)
+                child.geometry.deleteAttribute("uv");
+              if (child.geometry.attributes.uv2)
+                child.geometry.deleteAttribute("uv2");
+
+              // Disable shadows
+              child.castShadow = false;
+              child.receiveShadow = false;
+
+              // Use simple material rendering
+              if (child.material) {
+                child.material.side = THREE.FrontSide;
+                child.material.flatShading = true; // Flat shading is faster
+              }
+            }
+          });
+
+          // ✅ SMALLER SCALE FOR LOW-QUALITY
+          model.position.set(0, 0, -2);
+          model.scale.set(0.25, 0.25, 0.25); // Even smaller
+          sceneRef.current.add(model);
+          modelsRef.current[obj.id] = model;
+        } catch (error) {
+          console.error(`Failed to load model ${obj.id}:`, error);
+        }
       }
 
-      if (dist >= 15 && modelsRef.current[obj.id]) {
+      if (dist >= QUALITY_SETTINGS.maxDrawDistance && modelsRef.current[obj.id]) {
         sceneRef.current.remove(modelsRef.current[obj.id]);
+
+        // ✅ PROPER CLEANUP
+        modelsRef.current[obj.id].traverse((child) => {
+          if (child.geometry) {
+            child.geometry.dispose();
+          }
+          if (child.material) {
+            if (Array.isArray(child.material)) {
+              child.material.forEach((mat) => mat.dispose());
+            } else {
+              child.material.dispose();
+            }
+          }
+        });
         delete modelsRef.current[obj.id];
       }
     }
   }
 
-  // ---------------- RADAR DRAW ----------------
+  // ============================================
+  // RADAR DRAW (optimized with gradient caching)
+  // ============================================
   function drawRadar() {
     const canvas = radarCanvasRef.current;
     if (!canvas) return;
 
-    const ctx = canvas.getContext("2d");
+    const ctx = canvas.getContext("2d", {
+      willReadFrequently: false,
+      alpha: true,
+    });
+
     const size = canvas.width;
     const center = size / 2;
     const radius = center - 10;
@@ -184,32 +290,35 @@ export default function ARGame() {
 
     ctx.clearRect(0, 0, size, size);
 
-    // Background gradient
-    const bgGradient = ctx.createRadialGradient(
-      center,
-      center,
-      0,
-      center,
-      center,
-      radius,
-    );
-    bgGradient.addColorStop(0, "rgba(0, 20, 10, 0.9)");
-    bgGradient.addColorStop(1, "rgba(0, 10, 5, 0.95)");
+    // ✅ CACHE GRADIENT (Don't recreate every frame)
+    const gradientKey = `${size}-${center}-${radius}`;
+    if (!gradientCacheRef.current[gradientKey]) {
+      const bgGradient = ctx.createRadialGradient(
+        center,
+        center,
+        0,
+        center,
+        center,
+        radius,
+      );
+      bgGradient.addColorStop(0, "rgba(0, 20, 10, 0.9)");
+      bgGradient.addColorStop(1, "rgba(0, 10, 5, 0.95)");
+      gradientCacheRef.current[gradientKey] = bgGradient;
+    }
+
     ctx.beginPath();
     ctx.arc(center, center, radius, 0, Math.PI * 2);
-    ctx.fillStyle = bgGradient;
+    ctx.fillStyle = gradientCacheRef.current[gradientKey];
     ctx.fill();
 
     // Range rings (25m and 50m)
     ctx.strokeStyle = "rgba(0, 255, 100, 0.3)";
     ctx.lineWidth = 1;
 
-    // 25m ring
     ctx.beginPath();
     ctx.arc(center, center, radius / 2, 0, Math.PI * 2);
     ctx.stroke();
 
-    // 50m ring (outer)
     ctx.beginPath();
     ctx.arc(center, center, radius, 0, Math.PI * 2);
     ctx.strokeStyle = "rgba(0, 255, 100, 0.5)";
@@ -226,7 +335,7 @@ export default function ARGame() {
     ctx.lineTo(center + radius, center);
     ctx.stroke();
 
-    // Cardinal directions (N, S, E, W) - FIXED, don't rotate
+    // Cardinal directions
     const cardinals = [
       { label: "N", angle: 0, color: "#ff4444" },
       { label: "E", angle: 90, color: "#00ff88" },
@@ -247,12 +356,11 @@ export default function ARGame() {
       ctx.fillText(dir.label, x, y);
     }
 
-    // Direction needle - ROTATES based on heading
+    // Direction needle
     ctx.save();
     ctx.translate(center, center);
-    ctx.rotate((heading * Math.PI) / 180); // Rotate needle based on heading
+    ctx.rotate((heading * Math.PI) / 180);
 
-    // Needle triangle pointing up (rotates with heading)
     ctx.beginPath();
     ctx.moveTo(0, -radius + 20);
     ctx.lineTo(-8, 0);
@@ -261,7 +369,6 @@ export default function ARGame() {
     ctx.fillStyle = "#00ff88";
     ctx.fill();
 
-    // Needle back (opposite direction)
     ctx.beginPath();
     ctx.moveTo(0, radius - 30);
     ctx.lineTo(-5, 0);
@@ -272,17 +379,15 @@ export default function ARGame() {
 
     ctx.restore();
 
-    // Objects (red dots for items within 50m) - FIXED positions (not rotated)
+    // Objects on radar
     if (userGpsRef.current) {
       const scale = radius / 50;
       for (const obj of AR_OBJECTS) {
         const { x, y, dist } = getXY(userGpsRef.current, obj);
         if (dist > 50) continue;
 
-        // Fixed position - no rotation, shows actual world location
-        // x = East/West, y = North/South
         const dotX = center + x * scale;
-        const dotY = center - y * scale; // Y inverted because canvas Y goes down
+        const dotY = center - y * scale;
 
         // Glow effect
         ctx.beginPath();
@@ -296,14 +401,13 @@ export default function ARGame() {
         ctx.fillStyle = "#ff3333";
         ctx.fill();
 
-        // Dot border
         ctx.strokeStyle = "#ff6666";
         ctx.lineWidth = 1;
         ctx.stroke();
       }
     }
 
-    // User dot (center)
+    // User dot
     ctx.beginPath();
     ctx.arc(center, center, 6, 0, Math.PI * 2);
     ctx.fillStyle = "#00ff88";
@@ -313,7 +417,7 @@ export default function ARGame() {
     ctx.fillStyle = "white";
     ctx.fill();
 
-    // Range label
+    // Range labels
     ctx.font = "9px Arial";
     ctx.fillStyle = "rgba(0, 255, 100, 0.6)";
     ctx.textAlign = "right";
@@ -321,13 +425,16 @@ export default function ARGame() {
     ctx.fillText("25m", center + radius / 2 - 3, center + 10);
   }
 
-  // ---------------- MATH ----------------
+  // ============================================
+  // MATH HELPERS
+  // ============================================
   function getXY(a, b) {
     const R = 6371000;
     const dLat = (b.lat - a.lat) * (Math.PI / 180);
     const dLon = (b.lon - a.lon) * (Math.PI / 180);
 
-    const x = dLon * Math.cos(((a.lat + b.lat) / 2) * (Math.PI / 180)) * R;
+    const x =
+      dLon * Math.cos(((a.lat + b.lat) / 2) * (Math.PI / 180)) * R;
     const y = dLat * R;
 
     return { x, y, dist: Math.sqrt(x * x + y * y) };
@@ -342,7 +449,7 @@ export default function ARGame() {
     <div className="w-screen h-screen relative">
       <canvas ref={canvasRef} className="w-full h-full" />
 
-      {/* Loading overlay - shown until GPS is ready */}
+      {/* Loading overlay */}
       {!gpsReady && (
         <div
           style={{
@@ -359,7 +466,6 @@ export default function ARGame() {
             zIndex: 100,
           }}
         >
-          {/* Spinner */}
           <div
             style={{
               width: 50,
